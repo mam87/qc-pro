@@ -3,6 +3,7 @@
 // =====================================================================
 import { SUPABASE_URL, SUPABASE_ANON_KEY, LAB_NAME, APP_NAME } from './config.js';
 import * as S from './stats.js';
+import { SEED } from './seed.js';
 
 const root = document.getElementById('root');
 const configured = !SUPABASE_URL.includes('YOUR-PROJECT') && !SUPABASE_ANON_KEY.includes('YOUR-ANON');
@@ -903,7 +904,31 @@ VIEWS.users = async view => {
 VIEWS.setup = async view => {
   const tab = (new URLSearchParams(location.hash.split('?')[1] || '').get('tab')) || 'tests';
   const tabs = { tests: 'الفحوص', lots: 'لوتات QC', analyzers: 'الأجهزة', depts: 'الأقسام' };
-  view.innerHTML = `<div class="tabs no-print" style="max-width:560px;margin-top:0">${Object.entries(tabs).map(([k, v]) => `<button data-t="${k}" class="${k === tab ? 'active' : ''}">${v}</button>`).join('')}</div><div id="out"></div>`;
+  const seedTotal = SEED.reduce((n, d) => n + d.tests.length, 0);
+  view.innerHTML = `<div class="row no-print" style="align-items:center;margin-bottom:14px">
+      <div class="tabs" style="max-width:560px;margin:0">${Object.entries(tabs).map(([k, v]) => `<button data-t="${k}" class="${k === tab ? 'active' : ''}">${v}</button>`).join('')}</div>
+      <button class="btn" id="seed" title="${SEED.length} أقسام و ${seedTotal} فحصاً مع TEa"><i class="fa-solid fa-wand-magic-sparkles"></i> تحميل الأقسام والفحوص القياسية</button></div>
+    <div id="out"></div>`;
+  $('#seed').onclick = async () => {
+    if (!confirm(`سيتم إضافة ${SEED.length} أقسام و ${seedTotal} فحصاً (مع الوحدات و TEa حسب CLIA 2024).\nالعناصر الموجودة مسبقاً بنفس الاسم لن تتكرر. متابعة؟`)) return;
+    const btn = $('#seed'); btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> جارٍ التحميل...';
+    try {
+      const missingDepts = SEED.map(d => d.dept).filter(n => !state.depts.some(d => d.name === n));
+      if (missingDepts.length) await q(sb.from('departments').insert(missingDepts.map(name => ({ name }))));
+      const depts = await q(sb.from('departments').select('*'));
+      const rows = [];
+      SEED.forEach(d => {
+        const deptId = depts.find(x => x.name === d.dept).id;
+        d.tests.forEach(t => {
+          if (!state.tests.some(x => x.name === t.name && x.department_id === deptId))
+            rows.push({ name: t.name, code: t.code, unit: t.unit || null, tea: t.tea, tea_source: t.src, decimals: t.dec, department_id: deptId, rules: S.DEFAULT_RULES, active: true });
+        });
+      });
+      if (rows.length) await q(sb.from('tests').insert(rows));
+      toast(`تمت إضافة ${missingDepts.length} قسم و ${rows.length} فحص`, 'ok');
+      await loadRefs(); route();
+    } catch (e) { toast(e.message, 'bad'); btn.disabled = false; }
+  };
   $$('[data-t]', view).forEach(b => b.onclick = () => location.hash = `#/setup?tab=${b.dataset.t}`);
   const out = $('#out');
   const reload = async () => { await loadRefs(); route(); };
