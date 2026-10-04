@@ -19,7 +19,7 @@ const state = {
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const isSuper = () => state.profile?.role === 'superadmin' && state.profile?.status === 'active';
+const isSuper = () => !state.singleLab && state.profile?.role === 'superadmin' && state.profile?.status === 'active';
 const isAdmin = () => ['admin', 'superadmin'].includes(state.profile?.role) && state.profile?.status === 'active';
 const labName = () => state.org?.name || LAB_NAME;
 const orgValid = o => !!o && o.active && (!o.valid_until || new Date(o.valid_until + 'T23:59:59') >= new Date());
@@ -896,10 +896,10 @@ VIEWS.guide = async view => {
 // ---------------- Admin: users
 VIEWS.users = async view => {
   await loadRefs();
-  const pending = state.profiles.filter(p => p.status === 'pending' && p.org_id === state.profile.org_id).length;
+  const pending = state.profiles.filter(p => p.status === 'pending' && (state.singleLab || p.org_id === state.profile.org_id)).length;
   $('#vs').textContent = pending ? `${pending} حساب بانتظار الموافقة` : '';
   view.innerHTML = `<div class="card"><div class="tbl-wrap"><table><thead><tr><th>الاسم</th><th>البريد</th><th>الدور</th><th>الحالة</th><th>القسم</th><th>تاريخ التسجيل</th><th></th></tr></thead><tbody>
-    ${state.profiles.filter(p => p.org_id === state.profile.org_id).map(p => `<tr data-id="${p.id}">
+    ${state.profiles.filter(p => state.singleLab || p.org_id === state.profile.org_id).map(p => `<tr data-id="${p.id}">
       <td><input class="fn" value="${esc(p.full_name || '')}" style="min-width:150px"></td><td class="ltr">${esc(p.email)}</td>
       <td><select class="role" ${p.id === state.profile.id || (p.role === 'superadmin' && !isSuper()) ? 'disabled' : ''}>${(p.role === 'superadmin' ? ['superadmin'] : ['user', 'admin']).map(r => `<option value="${r}" ${p.role === r ? 'selected' : ''}>${ROLE_AR[r]}</option>`).join('')}</select></td>
       <td><select class="status" ${p.id === state.profile.id || (p.role === 'superadmin' && !isSuper()) ? 'disabled' : ''}>${['pending', 'active', 'disabled'].map(s => `<option value="${s}" ${p.status === s ? 'selected' : ''}>${{ pending: '⏳ بانتظار', active: '✅ فعّال', disabled: '⛔ موقوف' }[s]}</option>`).join('')}</select></td>
@@ -1092,7 +1092,9 @@ async function boot() {
     const prof = await q(sb.from('profiles').select('*').eq('id', session.user.id));
     state.profile = prof[0] || null;
     state.org = state.profile?.org_id ? (await q(sb.from('organizations').select('*').eq('id', state.profile.org_id)))[0] : null;
-    if (!state.profile || state.profile.status !== 'active' || (!isSuper() && !orgValid(state.org))) return renderPending();
+    // قاعدة بيانات v1 (قبل تشغيل migration_v2) لا تحوي org_id: نعمل بوضع المختبر الواحد
+    state.singleLab = !!state.profile && !('org_id' in state.profile);
+    if (!state.profile || state.profile.status !== 'active' || (!state.singleLab && !isSuper() && !orgValid(state.org))) return renderPending();
     await loadRefs();
     renderShell();
   } catch (e) {
