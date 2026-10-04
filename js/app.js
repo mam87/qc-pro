@@ -19,7 +19,12 @@ const state = {
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const isAdmin = () => state.profile?.role === 'admin' && state.profile?.status === 'active';
+const isSuper = () => state.profile?.role === 'superadmin' && state.profile?.status === 'active';
+const isAdmin = () => ['admin', 'superadmin'].includes(state.profile?.role) && state.profile?.status === 'active';
+const labName = () => state.org?.name || LAB_NAME;
+const orgValid = o => !!o && o.active && (!o.valid_until || new Date(o.valid_until + 'T23:59:59') >= new Date());
+const ROLE_AR = { superadmin: 'مالك المنصة', admin: 'مدير المختبر', user: 'مستخدم' };
+const PLAN_AR = { trial: 'تجريبي', basic: 'أساسي', standard: 'قياسي', enterprise: 'مؤسسي' };
 const pad = n => String(n).padStart(2, '0');
 const toLocalInput = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 const isoDate = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -155,12 +160,13 @@ function renderAuth(mode = 'login') {
   destroyCharts();
   root.innerHTML = `<div class="auth-wrap"><div class="auth-card">
     <div class="brand"><div class="logo"><i class="fa-solid fa-vial-circle-check"></i></div>
-      <div><h1>${APP_NAME}</h1><small>${esc(LAB_NAME)} — نظام ضبط الجودة</small></div></div>
+      <div><h1>${APP_NAME}</h1><small>نظام ضبط الجودة للمختبرات الطبية</small></div></div>
     ${mode === 'reset' ? '' : `<div class="tabs">
       <button data-m="login" class="${mode === 'login' ? 'active' : ''}">تسجيل الدخول</button>
       <button data-m="signup" class="${mode === 'signup' ? 'active' : ''}">حساب جديد</button></div>`}
     <form id="af">
-      ${mode === 'signup' ? `<div class="field"><label>الاسم الكامل</label><input name="name" required></div>` : ''}
+      ${mode === 'signup' ? `<div class="field"><label>الاسم الكامل</label><input name="name" required></div>
+        <div class="field" id="codew"><label>رمز المختبر</label><input name="code" dir="ltr" placeholder="يعطيك إياه مدير النظام" style="text-transform:uppercase"><div class="muted" id="orgn" style="font-size:12px;margin-top:4px"></div></div>` : ''}
       ${mode !== 'reset' ? `<div class="field"><label>البريد الإلكتروني</label><input name="email" type="email" dir="ltr" required autocomplete="email"></div>` : ''}
       ${mode !== 'forgot' ? `<div class="field"><label>${mode === 'reset' ? 'كلمة المرور الجديدة' : 'كلمة المرور'}</label><input name="password" type="password" dir="ltr" minlength="8" required autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}"></div>` : ''}
       ${mode === 'signup' ? `<div class="field"><label>تأكيد كلمة المرور</label><input name="password2" type="password" dir="ltr" minlength="8" required></div>` : ''}
@@ -174,6 +180,11 @@ function renderAuth(mode = 'login') {
   </div></div>`;
 
   $$('[data-m]').forEach(b => b.onclick = e => { e.preventDefault(); renderAuth(b.dataset.m); });
+  const codeIn = $('input[name=code]');
+  if (codeIn) {
+    sb.rpc('has_users').then(({ data }) => { if (data === false) $('#codew').innerHTML = '<div class="alert info"><i class="fa-solid fa-crown"></i>أول حساب في النظام — سيصبح مالك المنصة.</div>'; });
+    codeIn.onchange = async () => { const { data } = await sb.rpc('check_org_code', { p_code: codeIn.value }); $('#orgn').innerHTML = data ? `<span style="color:var(--ok)"><i class="fa-solid fa-check"></i> ${esc(data)}</span>` : '<span style="color:var(--bad)">رمز غير معروف</span>'; };
+  }
   $('#af').onsubmit = async e => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
@@ -184,9 +195,15 @@ function renderAuth(mode = 'login') {
         if (error) throw error;
       } else if (mode === 'signup') {
         if (f.password !== f.password2) throw new Error('كلمتا المرور غير متطابقتين');
+        const { data: hasUsers } = await sb.rpc('has_users');
+        if (hasUsers !== false) {
+          if (!f.code?.trim()) throw new Error('أدخل رمز المختبر');
+          const { data: orgName } = await sb.rpc('check_org_code', { p_code: f.code });
+          if (!orgName) throw new Error('رمز المختبر غير صحيح أو أن المختبر موقوف');
+        }
         const { data, error } = await sb.auth.signUp({
           email: f.email.trim(), password: f.password,
-          options: { data: { full_name: f.name.trim() }, emailRedirectTo: location.origin + location.pathname },
+          options: { data: { full_name: f.name.trim(), org_code: (f.code || '').trim().toUpperCase() }, emailRedirectTo: location.origin + location.pathname },
         });
         if (error) throw error;
         if (!data.session) { toast('تم إنشاء الحساب — تحقق من بريدك لتأكيده ثم سجّل الدخول', 'ok'); renderAuth('login'); }
@@ -203,7 +220,8 @@ function renderAuth(mode = 'login') {
       }
     } catch (err) {
       const m = err.message || String(err);
-      toast(m.includes('Invalid login') ? 'البريد أو كلمة المرور غير صحيحة' : m.includes('Email not confirmed') ? 'لم يتم تأكيد البريد بعد' : m, 'bad');
+      toast(m.includes('Invalid login') ? 'البريد أو كلمة المرور غير صحيحة' : m.includes('Email not confirmed') ? 'لم يتم تأكيد البريد بعد'
+        : m.includes('Database error saving new user') ? 'تعذّر إنشاء الحساب: تحقق من رمز المختبر، أو أن المختبر بلغ الحد الأقصى للمستخدمين' : m, 'bad');
     } finally { btn.disabled = false; }
   };
 }
@@ -212,8 +230,9 @@ function renderPending() {
   const p = state.profile;
   root.innerHTML = `<div class="auth-wrap"><div class="auth-card" style="text-align:center">
     <div class="brand" style="justify-content:center"><div class="logo"><i class="fa-solid fa-hourglass-half"></i></div></div>
+    ${p?.status === 'active' && !orgValid(state.org) ? `<h2>اشتراك المختبر غير فعّال</h2><p class="muted">اشتراك ${esc(state.org?.name || 'المختبر')} موقوف أو منتهٍ${state.org?.valid_until ? ` (${fd(state.org.valid_until)})` : ''}. تواصل مع مزود الخدمة لتجديده.</p>` : `
     <h2>${p?.status === 'disabled' ? 'الحساب موقوف' : 'بانتظار موافقة المدير'}</h2>
-    <p class="muted">${p?.status === 'disabled' ? 'تم إيقاف هذا الحساب. تواصل مع مدير النظام.' : 'تم إنشاء حسابك بنجاح. سيتمكن مدير الجودة من تفعيله وتحديد قسمك.'}</p>
+    <p class="muted">${p?.status === 'disabled' ? 'تم إيقاف هذا الحساب. تواصل مع مدير النظام.' : 'تم إنشاء حسابك بنجاح. سيتمكن مدير الجودة من تفعيله وتحديد قسمك.'}</p>`}
     <p class="ltr muted">${esc(p?.email || '')}</p>
     <div class="row" style="justify-content:center"><button class="btn" id="rl"><i class="fa-solid fa-rotate"></i> تحديث</button>
     <button class="btn danger" id="lo"><i class="fa-solid fa-right-from-bracket"></i> خروج</button></div></div></div>`;
@@ -234,6 +253,8 @@ const NAV = [
   { id: 'compare', icon: 'code-compare', label: 'مقارنة اللوتات' },
   { id: 'reports', icon: 'file-lines', label: 'التقارير الشهرية' },
   { id: 'guide', icon: 'book-medical', label: 'دليل القواعد' },
+  { sep: 'المنصة', super: true },
+  { id: 'platform', icon: 'building-shield', label: 'المختبرات المشتركة', super: true },
   { sep: 'الإدارة', admin: true },
   { id: 'users', icon: 'users', label: 'المستخدمون', admin: true },
   { id: 'setup', icon: 'sliders', label: 'الإعدادات (فحوص/لوتات)', admin: true },
@@ -244,8 +265,8 @@ function renderShell() {
   const p = state.profile;
   root.innerHTML = `<div class="app">
     <aside class="side" id="side">
-      <div class="brand"><div class="logo"><i class="fa-solid fa-vial-circle-check"></i></div><div><h1>${APP_NAME}</h1><small>${esc(LAB_NAME)}</small></div></div>
-      <nav class="nav">${NAV.filter(n => !n.admin || isAdmin()).map(n => n.sep ? `<div class="sep">${n.sep}</div>` :
+      <div class="brand"><div class="logo"><i class="fa-solid fa-vial-circle-check"></i></div><div><h1>${APP_NAME}</h1><small>${esc(labName())}</small></div></div>
+      <nav class="nav">${NAV.filter(n => (!n.admin || isAdmin()) && (!n.super || isSuper())).map(n => n.sep ? `<div class="sep">${n.sep}</div>` :
         `<a href="#/${n.id}" data-v="${n.id}"><i class="fa-solid fa-${n.icon}"></i>${n.label}</a>`).join('')}</nav>
     </aside>
     <main class="main">
@@ -255,7 +276,7 @@ function renderShell() {
           <div><h2 id="vt"></h2><div class="sub" id="vs"></div></div>
         </div>
         <div class="userchip"><div class="avatar">${esc((p.full_name || p.email || '?').trim()[0])}</div>
-          <div class="uname"><div style="font-size:14px">${esc(p.full_name || p.email)}</div><div class="muted" style="font-size:11px">${isAdmin() ? 'مدير النظام' : 'مستخدم'}</div></div>
+          <div class="uname"><div style="font-size:14px">${esc(p.full_name || p.email)}</div><div class="muted" style="font-size:11px">${ROLE_AR[p.role]}${isSuper() ? ` · ${esc(labName())}` : ''}</div></div>
           <button class="btn sm" id="lo" title="خروج"><i class="fa-solid fa-right-from-bracket"></i></button></div>
       </div>
       <div id="view"></div>
@@ -269,7 +290,7 @@ const VIEWS = {};
 async function route() {
   if (!state.profile) return;
   const id = (location.hash.replace('#/', '') || 'dashboard').split('?')[0];
-  const nav = NAV.find(n => n.id === id && (!n.admin || isAdmin())) || NAV[0];
+  const nav = NAV.find(n => n.id === id && (!n.admin || isAdmin()) && (!n.super || isSuper())) || NAV[0];
   $$('.nav a').forEach(a => a.classList.toggle('active', a.dataset.v === nav.id));
   $('#side')?.classList.remove('open');
   $('#vt').textContent = nav.label; $('#vs').textContent = '';
@@ -525,7 +546,7 @@ VIEWS.lj = async view => {
     const cst = S.describe(cumAcc, lot.target_mean, lot.target_sd);
 
     out.innerHTML = `
-    <div class="print-only"><h2>${esc(LAB_NAME)} — Levey-Jennings</h2></div>
+    <div class="print-only"><h2>${esc(labName())} — Levey-Jennings</h2></div>
     <div class="card"><h3><i class="fa-solid fa-chart-line"></i> ${esc(t.name)} — ${esc(lot.level)} <span class="muted ltr" style="font-size:13px">Lot ${esc(lot.lot_number)} · Exp ${fd(lot.expiry)}</span>
       <span style="margin-inline-start:auto" class="no-print"><button class="btn sm" id="png"><i class="fa-solid fa-image"></i> PNG</button> <button class="btn sm" onclick="print()"><i class="fa-solid fa-print"></i></button></span></h3>
       ${res.length ? '<div class="chart-box"><canvas id="c1"></canvas></div>' : '<div class="empty"><i class="fa-solid fa-chart-line"></i>لا توجد نتائج في هذه الفترة</div>'}
@@ -834,7 +855,7 @@ VIEWS.reports = async view => {
     const total = data.reduce((s, r) => s + r.n, 0), rej = data.reduce((s, r) => s + r.rej, 0);
     $('#out').innerHTML = `<div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px">
-        <div><h3 style="margin:0">${esc(LAB_NAME)} — تقرير ضبط الجودة الداخلي الشهري</h3><div class="muted num">${$('#m').value} ${dp ? '· ' + esc(deptName(dp)) : ''}</div></div>
+        <div><h3 style="margin:0">${esc(labName())} — تقرير ضبط الجودة الداخلي الشهري</h3><div class="muted num">${$('#m').value} ${dp ? '· ' + esc(deptName(dp)) : ''}</div></div>
         <div class="muted" style="font-size:13px">إجمالي النتائج: <b class="num">${total}</b> · المرفوض: <b class="num">${rej}</b> (${S.fmt(total ? rej / total * 100 : NaN, 1)}%)</div></div>
       ${data.length ? `<div class="tbl-wrap"><table><thead><tr><th>القسم</th><th>الفحص</th><th>المستوى</th><th>اللوت</th><th>N</th><th>Mean المستهدف</th><th>Mean</th><th>SD</th><th>CV%</th><th>Bias%</th><th>تحذير</th><th>رفض</th><th>Sigma</th></tr></thead><tbody>
       ${data.map(r => `<tr><td>${esc(deptName(r.t.department_id))}</td><td>${esc(r.t.name)}</td><td>${esc(r.l.level)}</td><td class="ltr">${esc(r.l.lot_number)}</td><td class="num">${r.n}</td>
@@ -875,13 +896,13 @@ VIEWS.guide = async view => {
 // ---------------- Admin: users
 VIEWS.users = async view => {
   await loadRefs();
-  const pending = state.profiles.filter(p => p.status === 'pending').length;
+  const pending = state.profiles.filter(p => p.status === 'pending' && p.org_id === state.profile.org_id).length;
   $('#vs').textContent = pending ? `${pending} حساب بانتظار الموافقة` : '';
   view.innerHTML = `<div class="card"><div class="tbl-wrap"><table><thead><tr><th>الاسم</th><th>البريد</th><th>الدور</th><th>الحالة</th><th>القسم</th><th>تاريخ التسجيل</th><th></th></tr></thead><tbody>
-    ${state.profiles.map(p => `<tr data-id="${p.id}">
+    ${state.profiles.filter(p => p.org_id === state.profile.org_id).map(p => `<tr data-id="${p.id}">
       <td><input class="fn" value="${esc(p.full_name || '')}" style="min-width:150px"></td><td class="ltr">${esc(p.email)}</td>
-      <td><select class="role" ${p.id === state.profile.id ? 'disabled' : ''}><option value="user" ${p.role === 'user' ? 'selected' : ''}>مستخدم</option><option value="admin" ${p.role === 'admin' ? 'selected' : ''}>مدير</option></select></td>
-      <td><select class="status" ${p.id === state.profile.id ? 'disabled' : ''}>${['pending', 'active', 'disabled'].map(s => `<option value="${s}" ${p.status === s ? 'selected' : ''}>${{ pending: '⏳ بانتظار', active: '✅ فعّال', disabled: '⛔ موقوف' }[s]}</option>`).join('')}</select></td>
+      <td><select class="role" ${p.id === state.profile.id || (p.role === 'superadmin' && !isSuper()) ? 'disabled' : ''}>${(p.role === 'superadmin' ? ['superadmin'] : ['user', 'admin']).map(r => `<option value="${r}" ${p.role === r ? 'selected' : ''}>${ROLE_AR[r]}</option>`).join('')}</select></td>
+      <td><select class="status" ${p.id === state.profile.id || (p.role === 'superadmin' && !isSuper()) ? 'disabled' : ''}>${['pending', 'active', 'disabled'].map(s => `<option value="${s}" ${p.status === s ? 'selected' : ''}>${{ pending: '⏳ بانتظار', active: '✅ فعّال', disabled: '⛔ موقوف' }[s]}</option>`).join('')}</select></td>
       <td><select class="dept">${opts(state.depts, p.department_id, x => x.name, '—')}</select></td>
       <td class="num">${fd(p.created_at)}</td>
       <td><button class="btn sm primary sv"><i class="fa-solid fa-floppy-disk"></i></button>
@@ -992,6 +1013,59 @@ VIEWS.setup = async view => {
   }
 };
 
+// ---------------- Platform owner: organizations (العملاء)
+VIEWS.platform = async view => {
+  const [orgs, stats] = await Promise.all([q(sb.from('organizations').select('*').order('created_at')), q(sb.rpc('org_stats'))]);
+  const st = id => stats.find(x => x.org_id === id) || {};
+  const soon = daysAgo(-30);
+  const expSoon = orgs.filter(o => o.active && o.valid_until && new Date(o.valid_until) <= soon && new Date(o.valid_until) >= new Date());
+  $('#vs').textContent = `أنت تعمل الآن داخل: ${labName()}`;
+  const F = [
+    { k: 'name', label: 'اسم المختبر / المستشفى', required: true, full: true },
+    { k: 'code', label: 'رمز التسجيل', required: true, hint: 'حروف إنجليزية وأرقام بدون مسافات، يعطى للعميل' },
+    { k: 'plan', label: 'الباقة', type: 'select', options: v => Object.entries(PLAN_AR).map(([k, l]) => `<option value="${k}" ${(v || 'standard') === k ? 'selected' : ''}>${l}</option>`).join('') },
+    { k: 'max_users', label: 'الحد الأقصى للمستخدمين', type: 'number', default: 10 },
+    { k: 'valid_until', label: 'الاشتراك ساري حتى', type: 'date', hint: 'اتركه فارغاً لاشتراك بلا نهاية' },
+    { k: 'contact_name', label: 'اسم جهة الاتصال' }, { k: 'contact_email', label: 'البريد' }, { k: 'phone', label: 'الهاتف' },
+    { k: 'notes', label: 'ملاحظات', type: 'textarea', full: true }, { k: 'active', label: 'فعّال', type: 'checkbox', default: true },
+  ];
+  const fix = d => ({ ...d, code: String(d.code || '').trim().toUpperCase().replace(/\s+/g, '') });
+  view.innerHTML = `<div class="grid g4">
+      <div class="kpi info"><i class="fa-solid fa-building"></i><div class="l">المختبرات</div><div class="v num">${orgs.length}</div></div>
+      <div class="kpi ok"><i class="fa-solid fa-circle-check"></i><div class="l">اشتراكات فعّالة</div><div class="v num">${orgs.filter(orgValid).length}</div></div>
+      <div class="kpi warn"><i class="fa-solid fa-hourglass-end"></i><div class="l">تنتهي خلال 30 يوماً</div><div class="v num">${expSoon.length}</div></div>
+      <div class="kpi"><i class="fa-solid fa-users"></i><div class="l">إجمالي المستخدمين</div><div class="v num">${stats.reduce((n, x) => n + Number(x.users), 0)}</div></div></div>
+    <div class="card" style="margin-top:18px"><h3><i class="fa-solid fa-building-shield"></i> المختبرات المشتركة
+      <button class="btn sm primary" id="add" style="margin-inline-start:auto"><i class="fa-solid fa-plus"></i> مختبر جديد</button></h3>
+      <div class="tbl-wrap"><table><thead><tr><th>المختبر</th><th>الرمز</th><th>الباقة</th><th>المستخدمون</th><th>الفحوص</th><th>نتائج 30 يوم</th><th>آخر نشاط</th><th>ساري حتى</th><th>الحالة</th><th></th></tr></thead><tbody>
+      ${orgs.map(o => { const x = st(o.id), cur = o.id === state.profile.org_id; return `<tr style="${cur ? 'background:var(--amber-dim)' : ''}">
+        <td>${esc(o.name)}${cur ? ' <span class="badge info">الحالي</span>' : ''}<div class="muted" style="font-size:12px">${esc(o.contact_name || '')} ${esc(o.phone || '')}</div></td>
+        <td class="ltr"><b>${esc(o.code)}</b></td><td>${PLAN_AR[o.plan] || o.plan}</td>
+        <td class="num">${x.users ?? 0} / ${o.max_users ?? '∞'}</td><td class="num">${x.tests ?? 0}</td><td class="num">${x.results_30d ?? 0}</td>
+        <td class="num">${x.last_result ? fd(x.last_result) : '—'}</td><td class="num">${o.valid_until ? fd(o.valid_until) : '∞'}</td>
+        <td>${orgValid(o) ? '<span class="badge ok">فعّال</span>' : !o.active ? '<span class="badge muted">موقوف</span>' : '<span class="badge bad">منتهٍ</span>'}</td>
+        <td><button class="btn sm" data-ed="${o.id}" title="تعديل"><i class="fa-solid fa-pen"></i></button>
+          ${cur ? '' : `<button class="btn sm" data-sw="${o.id}" title="الدخول لهذا المختبر"><i class="fa-solid fa-right-to-bracket"></i></button>`}
+          <button class="btn sm" data-inv="${o.id}" title="رسالة دعوة"><i class="fa-solid fa-envelope"></i></button></td></tr>`; }).join('')}
+      </tbody></table></div>
+      <p class="muted" style="font-size:12px;margin-top:10px">أول من يسجّل برمز المختبر يصبح مديره تلقائياً، ومن بعده يحتاجون موافقته. زر <i class="fa-solid fa-right-to-bracket"></i> ينقلك للعمل داخل المختبر لتجهيزه (الفحوص، اللوتات) أو لتقديم الدعم.</p></div>`;
+  $('#add').onclick = () => formModal({ title: 'مختبر جديد', fields: F, onSave: async d => { await q(sb.from('organizations').insert(fix(d))); toast('تم إنشاء المختبر', 'ok'); route(); } });
+  $$('[data-ed]').forEach(b => b.onclick = () => formModal({ title: 'تعديل المختبر', fields: F, data: orgs.find(o => o.id == b.dataset.ed), onSave: async d => { await q(sb.from('organizations').update(fix(d)).eq('id', b.dataset.ed)); toast('تم الحفظ', 'ok'); if (+b.dataset.ed === state.profile.org_id) { await boot(); } else route(); } }));
+  $$('[data-sw]').forEach(b => b.onclick = async () => {
+    const o = orgs.find(x => x.id == b.dataset.sw);
+    if (!confirm(`الانتقال للعمل داخل "${o.name}"؟`)) return;
+    try { await q(sb.from('profiles').update({ org_id: o.id }).eq('id', state.profile.id)); location.hash = '#/dashboard'; await boot(); toast(`أنت الآن داخل ${o.name}`, 'ok'); } catch (e) { toast(e.message, 'bad'); }
+  });
+  $$('[data-inv]').forEach(b => b.onclick = () => {
+    const o = orgs.find(x => x.id == b.dataset.inv);
+    const link = location.origin + location.pathname;
+    const msg = `مرحباً،\nتم تفعيل اشتراك ${o.name} في نظام ${APP_NAME} لضبط الجودة.\n\n1) افتح الرابط: ${link}\n2) اختر "حساب جديد"\n3) أدخل رمز المختبر: ${o.code}\n\nأول حساب يُسجَّل يصبح مدير المختبر، ويوافق بعدها على حسابات الفريق.`;
+    modal(`<h3><i class="fa-solid fa-envelope"></i> رسالة دعوة — ${esc(o.name)}</h3><textarea id="im" style="min-height:220px">${esc(msg)}</textarea>
+      <div class="actions"><button class="btn primary" id="cp"><i class="fa-solid fa-copy"></i> نسخ</button><button class="btn" data-close>إغلاق</button></div>`,
+      m => { $('#cp', m).onclick = async () => { try { await navigator.clipboard.writeText($('#im', m).value); toast('تم النسخ', 'ok'); } catch { $('#im', m).select(); } }; });
+  });
+};
+
 // ---------------- Admin: audit
 VIEWS.audit = async view => {
   $('#vs').textContent = 'سجل غير قابل للتعديل لكل عمليات الإضافة والتعديل والحذف';
@@ -1017,7 +1091,8 @@ async function boot() {
   try {
     const prof = await q(sb.from('profiles').select('*').eq('id', session.user.id));
     state.profile = prof[0] || null;
-    if (!state.profile || state.profile.status !== 'active') return renderPending();
+    state.org = state.profile?.org_id ? (await q(sb.from('organizations').select('*').eq('id', state.profile.org_id)))[0] : null;
+    if (!state.profile || state.profile.status !== 'active' || (!isSuper() && !orgValid(state.org))) return renderPending();
     await loadRefs();
     renderShell();
   } catch (e) {
