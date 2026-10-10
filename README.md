@@ -80,4 +80,7 @@ supabase/schema.sql                   الجداول + RLS + الأدوار + س
 supabase/migration_v2_multitenant.sql تعدد المختبرات والاشتراكات
 supabase/seed.sql                     الأقسام والفحوص القياسية (بديل لزر التحميل)
 js/seed.js                            قائمة الأقسام والفحوص و TEa
+js/a11y.js                            ربط الحقول بعناوينها وأسماء أزرار الأيقونات لقارئ الشاشة
+vendor/                               Supabase JS 2.117.3 و Chart.js 4.4.1 مثبّتة الإصدار (مع SRI)
+tests/ui_check.py                     فحص الواجهة آلياً مقابل خادم وهمي (لا يلمس قاعدة البيانات)
 ```
