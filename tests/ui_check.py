@@ -2,6 +2,7 @@
 No request reaches the real database: every *.supabase.co call is answered locally.
 Usage: python3 tests/ui_check.py [AXE_PATH]   (serve the repo root on http://127.0.0.1:8766 first)"""
 import json, sys, base64, time, re, pathlib
+from urllib.parse import urlparse, parse_qsl
 from playwright.sync_api import sync_playwright
 
 import os
@@ -9,6 +10,7 @@ URL = os.environ.get('QC_URL', 'http://127.0.0.1:8766/index.html')
 AXE = pathlib.Path(sys.argv[1]).read_text() if len(sys.argv) > 1 else None
 REF = 'qlfhmrjweivlejnrycju'
 results = []
+INSERTS = []
 def check(name, ok, ev=''):
     results.append(bool(ok)); print(('PASS ' if ok else 'FAIL ') + name + (f'  [{ev}]' if ev else ''))
 
@@ -17,12 +19,18 @@ NOW = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 DATA = {
     'profiles': [ME],
     'organizations': [{'id': 1, 'name': 'مختبر تجريبي', 'code': 'MAIN', 'active': True, 'valid_until': None, 'plan': 'trial', 'max_users': 5}],
-    'departments': [{'id': 1, 'name': 'الكيمياء السريرية'}],
-    'analyzers': [{'id': 1, 'name': 'جهاز 1', 'department_id': 1}],
-    'tests': [{'id': 1, 'name': 'Glucose', 'unit': 'mmol/L', 'analyzer_id': 1, 'department_id': 1, 'tea': 6.9, 'decimals': 2, 'active': True, 'rules': None}],
+    'departments': [{'id': 1, 'name': 'الكيمياء السريرية'}, {'id': 2, 'name': 'أمراض الدم'}],
+    'analyzers': [{'id': 1, 'name': 'جهاز 1', 'department_id': 1}, {'id': 2, 'name': 'جهاز الدم', 'department_id': 2}],
+    'tests': [{'id': 1, 'name': 'Glucose', 'unit': 'mmol/L', 'analyzer_id': 1, 'department_id': 1, 'tea': 6.9, 'decimals': 2, 'active': True, 'rules': None},
+              {'id': 2, 'name': 'ALT', 'unit': 'U/L', 'analyzer_id': 1, 'department_id': 1, 'tea': 15, 'decimals': 1, 'active': True, 'rules': None},
+              {'id': 3, 'name': 'Hemoglobin', 'unit': 'g/dL', 'analyzer_id': 2, 'department_id': 2, 'tea': 4, 'decimals': 1, 'active': True, 'rules': None}],
     'qc_lots': [{'id': 1, 'test_id': 1, 'level': 'L1', 'lot_number': 'A1', 'target_mean': 5.2, 'target_sd': 0.12, 'active': True, 'expiry': '2027-01-01'},
-                {'id': 2, 'test_id': 1, 'level': 'L2', 'lot_number': 'A2', 'target_mean': 15.8, 'target_sd': 0.35, 'active': True, 'expiry': '2027-01-01'}],
-    'qc_results': [{'id': 1, 'lot_id': 1, 'test_id': 1, 'value': 5.24, 'z': 0.33, 'rules_violated': [], 'status': 'accept', 'run_at': NOW, 'entered_by': 'u1'}],
+                {'id': 2, 'test_id': 1, 'level': 'L2', 'lot_number': 'A2', 'target_mean': 15.8, 'target_sd': 0.35, 'active': True, 'expiry': '2027-01-01'},
+                {'id': 3, 'test_id': 2, 'level': 'L1', 'lot_number': 'B1', 'target_mean': 45.0, 'target_sd': 4.0, 'active': True, 'expiry': '2027-01-01'},
+                {'id': 4, 'test_id': 2, 'level': 'L2', 'lot_number': 'B2', 'target_mean': 140.0, 'target_sd': 8.0, 'active': True, 'expiry': '2027-01-01'},
+                {'id': 5, 'test_id': 3, 'level': 'N', 'lot_number': 'H1', 'target_mean': 13.0, 'target_sd': 0.3, 'active': True, 'expiry': '2027-01-01'}],
+    'qc_results': [{'id': 1, 'lot_id': 1, 'test_id': 1, 'value': 5.24, 'z': 0.33, 'rules_violated': [], 'status': 'accept', 'run_at': NOW, 'entered_by': 'u1'},
+                   {'id': 2, 'lot_id': 2, 'test_id': 1, 'value': 15.6, 'z': -0.57, 'rules_violated': [], 'status': 'accept', 'run_at': NOW, 'entered_by': 'u1'}],
     'eqa_results': [], 'audit_log': [],
 }
 def b64(o): return base64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip('=')
@@ -37,7 +45,17 @@ def backend(route):
         return route.fulfill(json={'has_users': True, 'check_org_code': True, 'org_stats': []}.get(fn, None))
     m = re.search(r'/rest/v1/([a-z_]+)', u)
     if m:
-        return route.fulfill(json=DATA.get(m.group(1), []), headers={'content-range': '0-0/*'})
+        table = m.group(1)
+        if route.request.method == 'POST':
+            rows = json.loads(route.request.post_data or '[]'); rows = rows if isinstance(rows, list) else [rows]
+            for r in rows: r.setdefault('id', 1000 + len(INSERTS)); DATA.setdefault(table, []).append(r); INSERTS.append((table, r))
+            return route.fulfill(status=201, json=rows)
+        rows = DATA.get(table, [])
+        for k, v in parse_qsl(urlparse(u).query):          # honour simple eq.<value> filters
+            if v.startswith('eq.'):
+                rows = [r for r in rows if str(r.get(k)).lower() == v[3:].lower()]
+        if 'order=run_at.desc' in u: rows = sorted(rows, key=lambda r: r.get('run_at', ''), reverse=True)
+        return route.fulfill(json=rows, headers={'content-range': '0-0/*'})
     if '/auth/v1/' in u:
         return route.fulfill(json={'user': SESSION['user']} if '/user' in u else {})
     route.fulfill(status=404, body='')
@@ -110,6 +128,41 @@ with sync_playwright() as p:
     axe(pg, 'QC entry')
     pg.goto(URL + '#/dashboard'); pg.wait_for_timeout(900)
     axe(pg, 'dashboard')
+    pg.context.close()
+
+    # ---------- QC Today board
+    pg = page(True, '#/today')
+    txt = pg.locator('#view').inner_text()
+    check('today: progress shows 1 of 3 tests recorded', 'تم تسجيل 1 من 3' in txt, txt[:60].replace('\n', ' '))
+    kpis = pg.evaluate("[...document.querySelectorAll('#view .kpi .v')].map(e=>e.textContent)")
+    check('today: KPI counts accept/warn/reject/pending = 1/0/0/2', kpis == ['1', '0', '0', '2'], str(kpis))
+    check('today: grouped by analyzer (2 groups)', pg.locator('#view .card h3').count() == 2)
+    check('today: done test shows values, pending tests show inputs', pg.locator('tr[data-row="1"] .tv').count() == 0 and pg.locator('tr[data-row="2"] .tv').count() == 2)
+    sv = pg.locator('tr[data-row="2"] .tsave')
+    check('today: save disabled until a value is entered', sv.is_disabled())
+    a1 = pg.locator('#tv-3'); a1.focus(); pg.wait_for_timeout(300); a1.fill('59.0'); pg.wait_for_timeout(200)   # z = 3.5 -> 1-3s reject
+    st = pg.locator('tr[data-row="2"] .tst').inner_text()
+    check('today: live evaluation flags ALT L1 z=3.5 as rejected', 'مرفوض' in st, st)
+    n0 = len(INSERTS); sv.click(); pg.wait_for_timeout(300)
+    check('today: reject opens corrective-action dialog (nothing saved yet)', pg.locator('#tca').count() == 1 and len(INSERTS) == n0)
+    pg.locator('#tcs').click(); pg.wait_for_timeout(300)
+    check('today: empty corrective action is refused', len(INSERTS) == n0 and pg.locator('#tca').count() == 1)
+    pg.locator('#tca').fill('إعادة المعايرة ثم إعادة QC'); pg.locator('#tcs').click(); pg.wait_for_timeout(900)
+    new = [r for t, r in INSERTS[n0:] if t == 'qc_results']
+    check('today: rejected run saved with status, rule and corrective action', len(new) == 1 and new[0]['status'] == 'reject' and '1-3s' in new[0]['rules_violated'] and new[0]['corrective_action'] and new[0]['lot_id'] == 3,
+          json.dumps(new, ensure_ascii=False)[:200])
+    check('today: after save ALT shows rejected + review link', pg.locator('tr[data-row="2"] a[href*="results"]').count() == 1)
+    h = pg.locator('#tv-5'); h.focus(); pg.wait_for_timeout(300); h.fill('13.1'); pg.wait_for_timeout(200)
+    n1 = len(INSERTS); pg.locator('tr[data-row="3"] .tsave').click(); pg.wait_for_timeout(900)
+    new = [r for t, r in INSERTS[n1:] if t == 'qc_results']
+    check('today: accepted run saves directly without dialog', len(new) == 1 and new[0]['status'] == 'accept' and new[0]['corrective_action'] is None)
+    txt = pg.locator('#view').inner_text()
+    check('today: board refreshes to 3 of 3 recorded', 'تم تسجيل 3 من 3' in txt)
+    pg.goto(URL + '#/today?left=1'); pg.wait_for_timeout(900)
+    check('today: "remaining only" filter hides recorded tests', pg.locator('#view tbody tr').count() == 0)
+    pg.goto(URL + '#/today?dept=2'); pg.wait_for_timeout(900)
+    check('today: department filter shows only that department', pg.locator('#view tbody tr').count() == 1 and pg.locator('tr[data-row="3"]').count() == 1)
+    axe(pg, 'QC today')
     pg.context.close()
 
     # ---------- signed in, phone

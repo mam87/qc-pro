@@ -11,6 +11,7 @@ body{min-height:100vh}
 a{color:var(--amber)}
 button,input,select,textarea{font:inherit;color:inherit}
 .hidden{display:none!important}
+.sr{position:absolute!important;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .num,.ltr{direction:ltr;unicode-bidi:isolate;font-variant-numeric:tabular-nums}
 
 /* ---------- Auth ---------- */
@@ -69,6 +70,7 @@ textarea{min-height:70px;resize:vertical}
 .btn.primary{background:linear-gradient(135deg,var(--amber),#d99a10);color:#1a1300;border:0;font-weight:700}
 .btn.primary:hover{filter:brightness(1.08)}
 .btn.danger{color:var(--bad)}
+a.btn{text-decoration:none;color:var(--text)}a.btn.primary{color:#1a1300}a.btn.danger{color:var(--bad)}
 .btn.sm{padding:5px 10px;font-size:13px}
 .btn.block{width:100%}
 .btn:disabled{opacity:.5;cursor:not-allowed}

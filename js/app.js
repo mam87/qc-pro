@@ -243,6 +243,7 @@ function renderPending() {
 // ---------------------------------------------------------------- shell + router
 const NAV = [
   { id: 'dashboard', icon: 'gauge-high', label: 'لوحة التحكم' },
+  { id: 'today', icon: 'clipboard-check', label: 'QC اليوم' },
   { id: 'entry', icon: 'pen-to-square', label: 'إدخال نتائج QC' },
   { id: 'lj', icon: 'chart-line', label: 'مخطط Levey-Jennings' },
   { id: 'results', icon: 'list-check', label: 'سجل النتائج والمراجعة' },
@@ -487,6 +488,117 @@ VIEWS.entry = async view => {
       } catch (e) { toast(e.message, 'bad'); btn.disabled = false; }
     };
   }
+};
+
+// ---------------- QC Today (batch board)
+const STATUS_RANK = { accept: 0, warning: 1, reject: 2 };
+const worst = arr => arr.reduce((a, s) => (STATUS_RANK[s] ?? -1) > (STATUS_RANK[a] ?? -1) ? s : a, null);
+VIEWS.today = async view => {
+  const today = isoDate(new Date());
+  $('#vs').textContent = new Date().toLocaleDateString('ar-JO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const lotsOf = id => state.lots.filter(l => l.test_id === id && l.active);
+  const tests = state.tests.filter(t => t.active && lotsOf(t.id).length);
+  if (!tests.length) { view.innerHTML = `<div class="empty"><i class="fa-solid fa-vials"></i>لا توجد فحوص فعّالة لها لوتات QC. ${isAdmin() ? '<a href="#/setup">أضف الفحوص واللوتات</a>' : ''}</div>`; return; }
+  const res = await fetchResults({ from: today });
+  const byTest = id => res.filter(r => r.test_id === id);
+  const maxLv = Math.max(...tests.map(t => lotsOf(t.id).length));
+  const qs = new URLSearchParams(location.hash.split('?')[1] || '');
+  const filt = { dept: qs.get('dept') || '', left: qs.get('left') === '1' };
+  const hist = {};          // lot_id -> last z-scores (loaded on demand)
+
+  const statusOf = t => { const r = byTest(t.id); return r.length ? worst(r.map(x => x.status)) : null; };
+  const counts = { accept: 0, warning: 0, reject: 0, none: 0 };
+  tests.forEach(t => counts[statusOf(t) || 'none']++);
+  const done = tests.length - counts.none, pct = n => (n / tests.length * 100).toFixed(1);
+  const depts = state.depts.filter(d => tests.some(t => t.department_id === d.id));
+  const chip = (label, href, on) => `<a href="${href}" class="btn sm${on ? ' primary' : ''}"${on ? ' aria-current="page"' : ''}>${label}</a>`;
+  const link = p => '#/today?' + new URLSearchParams(Object.entries({ dept: filt.dept, left: filt.left ? '1' : '', ...p }).filter(([, v]) => v)).toString();
+  const shown = tests.filter(t => (!filt.dept || t.department_id === +filt.dept) && (!filt.left || !statusOf(t)));
+  const groups = [...new Set(shown.map(t => t.analyzer_id))].map(a => ({ a, tests: shown.filter(t => t.analyzer_id === a) }));
+
+  const cell = (t, l) => {
+    const r = byTest(t.id).filter(x => x.lot_id === l.id).at(-1), d = dec(t);
+    if (r) return `<span class="num">${S.fmt(r.value, d)}</span> <span class="muted num" style="font-size:12px">(z ${S.fmt(r.z, 1)})</span>`;
+    return `<label class="sr" for="tv-${l.id}">${esc(t.name)} ${esc(l.level)}</label><input id="tv-${l.id}" class="tv" data-lot="${l.id}" data-test="${t.id}" type="number" step="any" dir="ltr" inputmode="decimal" placeholder="x̄ ${S.fmt(l.target_mean, d)}" style="width:120px">`;
+  };
+  const row = t => {
+    const st = statusOf(t), lots = lotsOf(t.id), last = byTest(t.id).at(-1);
+    const action = st === 'reject' ? `<a class="btn sm danger" href="#/results?test=${t.id}">مراجعة الرفض</a>`
+      : st ? `<span class="muted" style="font-size:12px">${new Date(last.run_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} · ${esc(userName(last.entered_by))}</span>`
+      : `<button class="btn sm primary tsave" data-test="${t.id}" disabled>حفظ</button>`;
+    return `<tr data-row="${t.id}"><th scope="row" style="text-align:right">${esc(t.name)} <span class="muted" style="font-weight:400;font-size:12px">${esc(t.unit || '')}</span></th>
+      ${[...Array(maxLv)].map((_, i) => `<td>${lots[i] ? `<div class="muted" style="font-size:11px">${esc(lots[i].level)}</div>${cell(t, lots[i])}` : ''}</td>`).join('')}
+      <td class="tst">${st ? statusBadge(st) + ' ' + rulesHtml([...new Set(byTest(t.id).flatMap(r => r.rules_violated || []))]) : '<span class="badge info">بانتظار الإدخال</span>'}</td><td>${action}</td></tr>`;
+  };
+
+  view.innerHTML = `
+  <div class="card"><div class="row" style="align-items:center">
+    <div><b style="font-size:16px">تم تسجيل <span class="num">${done}</span> من <span class="num">${tests.length}</span> فحصاً</b></div>
+    <div style="flex:2"><div role="progressbar" aria-label="تقدّم QC اليوم" aria-valuemin="0" aria-valuemax="${tests.length}" aria-valuenow="${done}" style="height:10px;border-radius:5px;background:var(--card2);overflow:hidden;display:flex">
+      <span style="width:${pct(counts.accept)}%;background:var(--ok)"></span><span style="width:${pct(counts.warning)}%;background:var(--warn)"></span><span style="width:${pct(counts.reject)}%;background:var(--bad)"></span></div></div>
+  </div></div>
+  <div class="grid g4">
+    <div class="kpi ok"><div class="l">مقبول</div><div class="v num">${counts.accept}</div></div>
+    <div class="kpi warn"><div class="l">تحذير</div><div class="v num">${counts.warning}</div></div>
+    <div class="kpi bad"><div class="l">مرفوض — أوقف النتائج</div><div class="v num">${counts.reject}</div></div>
+    <div class="kpi info"><div class="l">لم يُسجَّل بعد</div><div class="v num">${counts.none}</div></div>
+  </div>
+  <nav class="checks no-print" aria-label="تصفية" style="margin:16px 0">
+    ${chip('الكل', link({ dept: '' }), !filt.dept)}${depts.map(d => chip(esc(d.name), link({ dept: String(d.id) }), filt.dept === String(d.id))).join('')}
+    ${chip('المتبقّي فقط', link({ left: filt.left ? '' : '1' }), filt.left)}
+  </nav>
+  ${groups.length ? groups.map(g => `<div class="card"><h3><i class="fa-solid fa-microscope"></i> ${esc(analyzerName(g.a))}
+      <span class="muted" style="font-size:13px;font-weight:400">${g.tests.filter(statusOf).length} من ${g.tests.length} مسجّلة</span></h3>
+    <div class="tbl-wrap"><table><thead><tr><th>الفحص</th>${[...Array(maxLv)].map((_, i) => `<th>المستوى ${i + 1}</th>`).join('')}<th>الحالة</th><th><span class="sr">إجراء</span></th></tr></thead>
+    <tbody>${g.tests.map(row).join('')}</tbody></table></div></div>`).join('')
+    : '<div class="alert ok"><i class="fa-solid fa-check"></i>لا يوجد فحص متبقٍّ في هذا التصنيف.</div>'}
+  <p class="muted" style="font-size:12px">التقييم بقواعد Westgard يظهر فور الإدخال (مع آخر 12 نتيجة للوت). يُحفظ كل فحص بزرّه، والرفض يطلب الإجراء التصحيحي قبل الحفظ.</p>`;
+
+  async function loadHist(lotIds) {
+    const need = lotIds.filter(id => !(id in hist));
+    await Promise.all(need.map(async id => {
+      const l = lotById(id);
+      const rows = await q(sb.from('qc_results').select('value,run_at').eq('lot_id', id).order('run_at', { ascending: false }).limit(12));
+      hist[id] = rows.reverse().map(r => S.zScore(r.value, l.target_mean, l.target_sd));
+    }));
+  }
+  function evalRow(testId) {
+    const t = testById(testId), tr = $(`tr[data-row="${testId}"]`, view);
+    const inputs = $$('.tv', tr), zs = inputs.map(i => { const l = lotById(+i.dataset.lot), v = parseFloat(i.value); return isFinite(v) ? S.zScore(v, l.target_mean, l.target_sd) : null; });
+    const out = inputs.map((inp, i) => {
+      if (zs[i] == null || !hist[+inp.dataset.lot]) return null;
+      const l = lotById(+inp.dataset.lot), peers = zs.filter((z, j) => j !== i && z != null);
+      return { lot: l, value: parseFloat(inp.value), z: zs[i], ...S.evaluateWestgard([...hist[l.id], zs[i]], t.rules || S.DEFAULT_RULES, peers) };
+    });
+    const got = out.filter(Boolean);
+    $('.tst', tr).innerHTML = got.length ? statusBadge(worst(got.map(r => r.status))) + ' ' + rulesHtml([...new Set(got.flatMap(r => r.violated))]) : '<span class="badge info">بانتظار الإدخال</span>';
+    $('.tsave', tr).disabled = !got.length;
+    return got;
+  }
+  $$('.tv', view).forEach(inp => {
+    inp.onfocus = () => loadHist(lotsOf(+inp.dataset.test).map(l => l.id)).then(() => evalRow(+inp.dataset.test)).catch(e => toast(e.message, 'bad'));
+    inp.oninput = () => evalRow(+inp.dataset.test);
+  });
+  $$('.tsave', view).forEach(btn => btn.onclick = async () => {
+    const testId = +btn.dataset.test, t = testById(testId);
+    await loadHist(lotsOf(testId).map(l => l.id));
+    const got = evalRow(testId);
+    if (!got.length) return;
+    const save = async ca => {
+      const runAt = new Date().toISOString();
+      const rows = got.map(r => ({ lot_id: r.lot.id, test_id: testId, value: r.value, z: +r.z.toFixed(4), rules_violated: r.violated, status: r.status, run_at: runAt, comment: null, corrective_action: ca || null, entered_by: state.profile.id }));
+      btn.disabled = true;
+      try { await q(sb.from('qc_results').insert(rows)); toast(`تم حفظ ${esc(t.name)}`, 'ok'); closeModal(); route(); }
+      catch (e) { toast(e.message, 'bad'); btn.disabled = false; }
+    };
+    if (!got.some(r => r.status === 'reject')) return save(null);
+    const why = [...new Set(got.flatMap(r => r.violated))].filter(x => S.RULES[x]?.type === 'reject').map(x => S.RULES[x].desc).join('؛ ');
+    modal(`<h3><i class="fa-solid fa-hand"></i> التشغيل مرفوض — ${esc(t.name)}</h3>
+      <div class="alert bad"><div>أوقف إصدار نتائج المرضى لهذا الفحص. السبب: ${esc(why)}. راجع عينات المرضى منذ آخر QC مقبول.</div></div>
+      <div class="field"><label for="tca">الإجراء التصحيحي <span class="muted">(إلزامي)</span></label><textarea id="tca" placeholder="مثال: إعادة المعايرة، تغيير الكاشف، إعادة الفحص بمادة جديدة..."></textarea></div>
+      <div class="actions"><button class="btn primary" id="tcs">حفظ التشغيل المرفوض</button><button class="btn" data-close>إلغاء</button></div>`,
+      m => { $('#tca', m).focus(); $('#tcs', m).onclick = () => { const ca = $('#tca', m).value.trim(); if (!ca) { $('#tca', m).focus(); return toast('الإجراء التصحيحي إلزامي عند رفض التشغيل', 'bad'); } save(ca); }; });
+  });
 };
 
 // ---------------- Levey-Jennings
